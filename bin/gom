@@ -1,0 +1,186 @@
+#!/usr/bin/env bash
+# Gom - Go Manager
+# Go installation manager (SDKMAN style)
+
+# Script directory
+GOM_SELF="${BASH_SOURCE[0]}"
+GOM_DIR="$(cd "$(dirname "$GOM_SELF")/.." && pwd)"
+
+# Load libraries
+source "$GOM_DIR/lib/config.sh"
+source "$GOM_DIR/lib/utils.sh"
+source "$GOM_DIR/lib/api.sh"
+source "$GOM_DIR/lib/install.sh"
+
+# Help - available commands
+show_help() {
+    echo "Gom - Go Manager"
+    echo ""
+    echo "Usage: gom <command> [arguments]"
+    echo ""
+    echo "Commands:"
+    echo "  list              List available versions from go.dev"
+    echo "  list installed    List installed versions"
+    echo "  install           Interactive mode: choose version"
+    echo "  install latest    Install latest stable version"
+    echo "  install <version> Install specific version (e.g. 1.24)"
+    echo "  use latest        Set latest stable as default"
+    echo "  use <version>     Set default version (e.g. 1.24)"
+    echo "  current           Show current default version"
+    echo "  init              Generate command to add to PATH"
+    echo ""
+    echo "Examples:"
+    echo "  gom install latest    # Install latest version"
+    echo "  gom use latest        # Use latest installed"
+    echo "  gom use 1.24          # Use Go 1.24.x"
+    echo ""
+    echo "First time? Run: gom install latest"
+}
+
+# Command: list
+cmd_list() {
+    local json versions
+
+    if [[ "$1" == "installed" ]]; then
+        echo "Installed versions:"
+        list_installed | while read -r v; do
+            if [[ -L "$GOM_CURRENT" ]] && [[ "$(resolve_symlink "$GOM_CURRENT")" == "$(resolve_symlink "$GOM_VERSIONS/$v")" ]]; then
+                echo "  $v (current)"
+            else
+                echo "  $v"
+            fi
+        done
+        return 0
+    fi
+
+    json=$(fetch_versions_json)
+    if [[ -z "$json" ]]; then
+        err "Could not fetch versions from go.dev"
+        return 1
+    fi
+
+    echo "Available versions:"
+    parse_versions "$json" | filter_versions_for_list | while read -r v stable; do
+        local marker=""
+        if is_installed "$v"; then
+            if [[ -L "$GOM_CURRENT" ]] && [[ "$(resolve_symlink "$GOM_CURRENT")" == "$(resolve_symlink "$GOM_VERSIONS/$v")" ]]; then
+                marker=" (installed, current)"
+            else
+                marker=" (installed)"
+            fi
+        fi
+        echo "  $v${marker}"
+    done | awk -v w=40 '
+        { a[NR]=$0 }
+        END {
+            for (i=1; i<=NR; i+=3) {
+                c1 = a[i]; c2 = ""; c3 = ""
+                if (i+1 <= NR) c2 = a[i+1]
+                if (i+2 <= NR) c3 = a[i+2]
+                printf "%-*s  %-*s  %-*s\n", w, c1, w, c2, w, c3
+            }
+        }'
+    echo ""
+    echo "Note: You can install any version, e.g. gom install 1.22.4 or gom install 1.2.2"
+}
+
+# Command: current
+cmd_current() {
+    if [[ -L "$GOM_CURRENT" ]]; then
+        local target
+        target=$(readlink "$GOM_CURRENT")
+        echo "${target##*/}"
+    else
+        echo "No default version set."
+        echo "Run: gom use <version>"
+    fi
+}
+
+# Command: init
+cmd_init() {
+    echo "export PATH=\"\$HOME/.gom/current/bin:\$PATH\""
+}
+
+# Command: install
+cmd_install() {
+    local version="$1"
+
+    # If no versions and no argument, bootstrap
+    if [[ -z "$version" ]] && ! list_installed | grep -q .; then
+        gom_bootstrap
+        return $?
+    fi
+
+    # If no versions and argument passed, install directly
+    if [[ -z "$version" ]]; then
+        # Interactive mode: list and prompt
+        local json
+        json=$(fetch_versions_json)
+        if [[ -z "$json" ]]; then
+            err "Could not fetch versions"
+            return 1
+        fi
+        echo "Choose version to install:"
+        parse_versions "$json" | head -20 | nl
+        echo ""
+        read -p "Version (or line number): " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]]; then
+            version=$(parse_versions "$json" | sed -n "${choice}p" | awk '{print $1}')
+        else
+            version="$choice"
+        fi
+    fi
+
+    gom_install "$version"
+}
+
+# Command: use
+cmd_use() {
+    local version="$1"
+
+    if [[ -z "$version" ]]; then
+        if ! list_installed | grep -q .; then
+            gom_bootstrap
+        else
+            err "Usage: gom use <version>"
+            return 1
+        fi
+    else
+        gom_use "$version"
+    fi
+}
+
+# Main
+main() {
+    local cmd="${1:-}"
+    shift 2>/dev/null || true
+
+    case "$cmd" in
+        list)
+            cmd_list "$@"
+            ;;
+        install)
+            cmd_install "$@"
+            ;;
+        use)
+            cmd_use "$@"
+            ;;
+        current)
+            cmd_current "$@"
+            ;;
+        init)
+            cmd_init "$@"
+            ;;
+        help|--help|-h|"")
+            show_help
+            ;;
+        *)
+            err "Unknown command: $cmd"
+            echo ""
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"
